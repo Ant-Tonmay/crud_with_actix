@@ -10,3 +10,5 @@ mongodb = "3"
 serde = { version = "1.0", features = ["derive"] }
 dotenv = "0.15"
 tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+futures = "0.3"  # async operations

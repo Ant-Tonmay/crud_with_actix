@@ -1,128 +1,90 @@
-use actix_web::{web, HttpRequest, HttpResponse};
-use mongodb::bson::{doc, oid::ObjectId};
-use mongodb::Collection;
-use serde::{Deserialize, Serialize};
-
+use actix_web::{web, HttpResponse, Responder};
+use mongodb::{bson::{doc, oid::ObjectId}, Collection};
+use tokio::sync::futures;
 use crate::model::User;
+use ::futures_util::TryStreamExt;
 
-// Utility function to get the MongoDB collection
+
+
 fn get_user_collection(db: web::Data<mongodb::Database>) -> Collection<User> {
     db.collection::<User>("users")
 }
 
-// Create a new user
-pub async fn create_user(
-    req: HttpRequest,
-    db: web::Data<mongodb::Database>,
-    user: web::Json<User>,
-) -> HttpResponse {
+pub async fn create_user(db: web::Data<mongodb::Database>, user: web::Json<User>) -> impl Responder {
     let collection = get_user_collection(db);
     let new_user = User {
         id: None,
         name: user.name.clone(),
         email: user.email.clone(),
     };
-    match collection.insert_one(&new_user).await {
-        Ok(inserted) => {
-            if let Some(_id) = inserted.inserted_id.as_object_id() {
-                HttpResponse::Ok().json(new_user)
-            } else {
-                HttpResponse::InternalServerError().json("Failed to retrieve inserted ObjectId.")
-            }
-        }
-        Err(err) => {
-            eprintln!("Failed to insert new user: {}", err);
-            HttpResponse::InternalServerError().json("Error inserting new user.")
-        }
+    let result = collection.insert_one(new_user).await;
+
+    match result {
+        Ok(inserted) => HttpResponse::Ok().json(inserted.inserted_id),
+        Err(_) => HttpResponse::InternalServerError().finish(),
     }
 }
 
 // Get all users
-pub async fn get_all_users(db: web::Data<mongodb::Database>) -> HttpResponse {
+pub async fn get_users(db: web::Data<mongodb::Database>) -> impl Responder {
     let collection = get_user_collection(db);
-    
-    match collection.find(doc! {"id":""}).await {
-        Ok(mut cursor) => {
-            let mut users = Vec::new();
-            
-            while let Some(result) = cursor.next().await {
-                match result {
-                    Ok(user) => users.push(user),
-                    Err(err) => {
-                        eprintln!("Error processing user document: {}", err);
-                        return HttpResponse::InternalServerError().json("Error processing user documents");
-                    }
-                }
-            }
-            
-            HttpResponse::Ok().json(users)
-        }
-        Err(err) => {
-            eprintln!("Failed to fetch users: {}", err);
-            HttpResponse::InternalServerError().json("Error fetching users")
-        }
+    let mut cursor = collection.find(doc! {}).await.unwrap();
+
+    let mut users = vec![];
+
+    while let Some(user) = cursor.try_next().await.unwrap() {
+        users.push(user);
+    }
+
+    HttpResponse::Ok().json(users)
+}
+// Get user by ID
+pub async fn get_user(db: web::Data<mongodb::Database>, path: web::Path<String>) -> impl Responder {
+    let collection = get_user_collection(db);
+    // let id = ObjectId::parse_str(&path.into_inner()).unwrap();
+    let email = &path.into_inner();
+
+    let user = collection.find_one(doc! { "email": email}).await.unwrap();
+
+    match user {
+        Some(user) => HttpResponse::Ok().json(user),
+        None => HttpResponse::NotFound().finish(),
     }
 }
 
-// Get a user by email
-pub async fn get_user_by_email(
+// Update a user by ID
+pub async fn update_user(
     db: web::Data<mongodb::Database>,
-    email: web::Path<String>,
-) -> HttpResponse {
+    path: web::Path<String>,
+    user: web::Json<User>,
+) -> impl Responder {
     let collection = get_user_collection(db);
-    let filter = doc! { "email": email.to_string() };
-    match collection.find_one(filter).await {
-        Some(Ok(user)) => HttpResponse::Ok().json(user),
-        Some(Err(err)) => {
-            eprintln!("Failed to fetch user by email: {}", err);
-            HttpResponse::InternalServerError().json("Error fetching user by email.")
-        }
-        None => HttpResponse::NotFound().json("User not found."),
+    // let id = ObjectId::parse_str(&path.into_inner()).unwrap();
+    let email = &path.into_inner();
+
+    let result = collection
+        .update_one(
+            doc! { "email": email},
+            doc! { "$set": { "name": &user.name}},
+        )
+        .await;
+
+    match result {
+        Ok(_) => HttpResponse::Ok().finish(),
+        Err(_) => HttpResponse::InternalServerError().finish(),
     }
 }
 
-// Update a user's name
-pub async fn update_name(
-    db: web::Data<mongodb::Database>,
-    email: web::Path<String>,
-    new_name: web::Json<String>,
-) -> HttpResponse {
+// Delete a user by ID
+pub async fn delete_user(db: web::Data<mongodb::Database>, path: web::Path<String>) -> impl Responder {
     let collection = get_user_collection(db);
-    let filter = doc! { "email": email.to_string() };
-    let update = doc! { "$set": { "name": new_name.clone() } };
-    match collection.update_one(filter, update).await {
-        Ok(result) => {
-            if result.matched_count > 0 {
-                HttpResponse::Ok().json("User's name updated successfully.")
-            } else {
-                HttpResponse::NotFound().json("User not found.")
-            }
-        }
-        Err(err) => {
-            eprintln!("Failed to update user's name: {}", err);
-            HttpResponse::InternalServerError().json("Error updating user's name.")
-        }
-    }
-}
+    // let id = ObjectId::parse_str(&path.into_inner()).unwrap();
+    let email = &path.into_inner();
 
-// Delete a user by email
-pub async fn delete_user_by_email(
-    db: web::Data<mongodb::Database>,
-    email: web::Path<String>,
-) -> HttpResponse {
-    let collection = get_user_collection(db);
-    let filter = doc! { "email": email.to_string() };
-    match collection.delete_one(filter).await {
-        Ok(result) => {
-            if result.deleted_count > 0 {
-                HttpResponse::Ok().json("User deleted successfully.")
-            } else {
-                HttpResponse::NotFound().json("User not found.")
-            }
-        }
-        Err(err) => {
-            eprintln!("Failed to delete user: {}", err);
-            HttpResponse::InternalServerError().json("Error deleting user.")
-        }
+    let result = collection.delete_one(doc! { "email": email }).await;
+
+    match result {
+        Ok(_) => HttpResponse::Ok().finish(),
+        Err(_) => HttpResponse::InternalServerError().finish(),
     }
 }
